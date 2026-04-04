@@ -1,5 +1,5 @@
-function result = solve_wls_step(z, x0, params, weights, options)
-    if nargin < 5
+function result = solve_wls_step(z, x0, xPrev, params, weights, options)
+    if nargin < 6
         options = struct();
     end
     options = apply_solver_defaults(options);
@@ -10,7 +10,7 @@ function result = solve_wls_step(z, x0, params, weights, options)
     end
 
     x = x0;
-    residual = residual_function(z, x, params);
+    residual = residual_function(z, x, xPrev, params);
     initialResidualNorm = norm(residual);
 
     result = struct();
@@ -21,8 +21,8 @@ function result = solve_wls_step(z, x0, params, weights, options)
         'chi_square', {});
 
     for iter = 1:options.max_iterations
-        residual = residual_function(z, x, params);
-        J = jacobian_function(x, params);
+        residual = residual_function(z, x, xPrev, params);
+        J = jacobian_function(x, xPrev, params);
 
         normalMatrix = J.' * weights * J;
         gradient = J.' * weights * residual;
@@ -35,7 +35,7 @@ function result = solve_wls_step(z, x0, params, weights, options)
 
         dx = regularizedMatrix \ gradient;
         xCandidate = x + dx;
-        residualCandidate = residual_function(z, xCandidate, params);
+        residualCandidate = residual_function(z, xCandidate, xPrev, params);
 
         result.history(end + 1) = struct( ... %#ok<AGROW>
             'iteration', iter, ...
@@ -59,10 +59,11 @@ function result = solve_wls_step(z, x0, params, weights, options)
         end
     end
 
-    finalResidual = residual_function(z, x, params);
+    finalResidual = residual_function(z, x, xPrev, params);
     result.x = x;
+    result.x_previous = xPrev;
     result.residual = finalResidual;
-    result.predicted_measurement = measurement_function(x, params);
+    result.predicted_measurement = measurement_function(x, xPrev, params);
     result.initial_residual_norm = initialResidualNorm;
     result.final_residual_norm = norm(finalResidual);
     result.chi_square = finalResidual.' * weights * finalResidual;
@@ -71,15 +72,15 @@ end
 
 function options = apply_solver_defaults(options)
     if ~isfield(options, 'max_iterations')
-        options.max_iterations = 15;
+        options.max_iterations = 20;
     end
     if ~isfield(options, 'step_tolerance')
-        options.step_tolerance = 1e-9;
+        options.step_tolerance = 1e-8;
     end
     if ~isfield(options, 'residual_tolerance')
-        options.residual_tolerance = 1e-9;
+        options.residual_tolerance = 1e-8;
     end
     if ~isfield(options, 'damping')
-        options.damping = 1e-9;
+        options.damping = 1e-8;
     end
 end

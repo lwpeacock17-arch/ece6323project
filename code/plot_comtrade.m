@@ -63,6 +63,10 @@ function fig = plot_comtrade(dataStruct, plotSpec)
         ylabel('\chi^2');
         title('Chi-Square Statistic', 'Interpreter', 'tex');
     end
+
+    if plotSpec.showResidualBreakdown
+        plot_residual_breakdown(dataStruct, plotSpec);
+    end
 end
 
 function plotSpec = apply_plot_defaults(plotSpec)
@@ -89,5 +93,61 @@ function plotSpec = apply_plot_defaults(plotSpec)
     end
     if ~isfield(plotSpec, 'chiSquare')
         plotSpec.chiSquare = [];
+    end
+    if ~isfield(plotSpec, 'showResidualBreakdown')
+        plotSpec.showResidualBreakdown = false;
+    end
+    if ~isfield(plotSpec, 'residualMatrix')
+        plotSpec.residualMatrix = [];
+    end
+    if ~isfield(plotSpec, 'residualLabels')
+        plotSpec.residualLabels = {};
+    end
+end
+
+function plot_residual_breakdown(dataStruct, plotSpec)
+    figName = sprintf('%s Residual Breakdown', dataStruct.event_name);
+    figure('Name', figName, 'Color', 'w');
+
+    groups = { ...
+        1, ...
+        2:4, ...
+        5:7, ...
+        8:10, ...
+        11:15, ...
+        16:21};
+    titles = { ...
+        'Actual Measurement', ...
+        'KCL Constraints', ...
+        'KVL Constraints', ...
+        'Node and Flux Constraints', ...
+        'Nonlinear Magnetization', ...
+        'Derived and Pseudo Measurements'};
+
+    colors = lines(6);
+    for idx = 1:numel(groups)
+        subplot(3, 2, idx);
+        cols = groups{idx};
+        plot(plotSpec.diagnosticTime, plotSpec.residualMatrix(:, cols), 'LineWidth', 1.0);
+        grid on;
+        xlabel('Time (s)');
+        ylabel('Residual');
+        title(titles{idx}, 'Interpreter', 'none');
+
+        labels = plotSpec.residualLabels(cols);
+        if isempty(labels)
+            labels = build_default_labels(cols);
+        end
+        legend(labels, 'Location', 'best', 'Interpreter', 'none');
+
+        ax = gca;
+        ax.ColorOrder = colors;
+    end
+end
+
+function labels = build_default_labels(indices)
+    labels = cell(size(indices));
+    for idx = 1:numel(indices)
+        labels{idx} = sprintf('r_%d', indices(idx));
     end
 end

@@ -4,15 +4,8 @@ clc;
 projectRoot = fileparts(mfilename('fullpath'));
 dataDir = fullfile(projectRoot, 'data');
 
-params = struct();
-params.burden_resistance = 1.0;
-params.turns_ratio = 200.0;
-params.magnetizing_inductance = 0.05;
-params.pseudo_measurement_sigma = [1e-3; 1e-3; 5e-3; 5e-3];
-params.wls_sample_index = 400;
-params.time_series_stride = 1;
-params.wls_options = struct('max_iterations', 15, 'step_tolerance', 1e-9, ...
-    'residual_tolerance', 1e-9, 'damping', 1e-9);
+params = build_assignment_parameters();
+stateInfo = state_definition();
 
 eventFiles = discover_comtrade_pairs(dataDir);
 fprintf('Discovered %d COMTRADE event(s) in %s\n', numel(eventFiles), dataDir);
@@ -24,20 +17,26 @@ for idx = 1:numel(eventFiles)
     datPath = eventFiles(idx).dat;
     data = read_comtrade(cfgPath, datPath);
 
-    data.baseline_current = (data.v_out ./ params.burden_resistance) .* params.turns_ratio;
+    params.time_step = estimate_time_step(data.time, data.sample_rate_hz);
+    params.gs1 = 0.5 * params.time_step / (2 * params.L1);
+    params.gs2 = 0.5 * params.time_step / (2 * params.L2);
+    params.gs3 = 0.5 * params.time_step / (2 * params.L3);
 
-    stateInfo = state_definition();
-    sampleIndex = min(max(params.wls_sample_index, 1), numel(data.v_out));
+    data.baseline_current = (data.v_out ./ params.Rb) .* params.n;
+
+    sampleIndex = min(max(params.wls_sample_index, 2), numel(data.v_out));
     measurement = build_single_step_measurement(data, sampleIndex, params);
+    xPrev = build_initial_guess(data, sampleIndex - 1, params);
     x0 = build_initial_guess(data, sampleIndex, params);
 
     weights = diag(1 ./ (measurement.sigma .^ 2));
-    wlsResult = solve_wls_step(measurement.z, x0, params, weights, params.wls_options);
-    trajectory = run_time_series_estimation(data, params);
+    wlsResult = solve_wls_step(measurement.z, x0, xPrev, params, weights, params.wls_options);
+    trajectory = run_time_series_estimation(data, params, stateInfo);
 
-    data.estimated_current = trajectory.state(:, 3);
-    data.estimated_magnetizing_current = trajectory.state(:, 4);
-    data.estimated_flux = trajectory.state(:, 5);
+    data.estimated_current = trajectory.state(:, stateInfo.index.ip);
+    data.estimated_burden_current = trajectory.state(:, stateInfo.index.ibm);
+    data.estimated_magnetizing_current = trajectory.state(:, stateInfo.index.im);
+    data.estimated_flux = trajectory.state(:, stateInfo.index.lambda);
 
     plotSpec = struct();
     plotSpec.showBaseline = true;
@@ -45,14 +44,18 @@ for idx = 1:numel(eventFiles)
     plotSpec.showDiagnostics = true;
     plotSpec.figureName = sprintf('%s Overview', data.event_name);
     plotSpec.currentLabel = sprintf('Current Estimates, R_b = %.3f ohm, n = %.1f', ...
-        params.burden_resistance, params.turns_ratio);
+        params.Rb, params.n);
     plotSpec.diagnosticTime = trajectory.time;
     plotSpec.residualNorm = trajectory.final_residual_norm;
     plotSpec.chiSquare = trajectory.chi_square;
+    plotSpec.showResidualBreakdown = true;
+    plotSpec.residualMatrix = trajectory.residual;
+    plotSpec.residualLabels = measurement.labels;
     plot_comtrade(data, plotSpec);
 
     fprintf('\nEvent: %s\n', data.event_name);
     fprintf('  Samples: %d\n', numel(data.time));
+    fprintf('  Time step: %.9f s\n', params.time_step);
     fprintf('  WLS sample index: %d\n', sampleIndex);
     fprintf('  Initial residual norm: %.6e\n', wlsResult.initial_residual_norm);
     fprintf('  Final residual norm:   %.6e\n', wlsResult.final_residual_norm);
@@ -66,9 +69,45 @@ for idx = 1:numel(eventFiles)
     results(idx).measurement = measurement; %#ok<SAGROW>
     results(idx).wls = wlsResult; %#ok<SAGROW>
     results(idx).trajectory = trajectory; %#ok<SAGROW>
+    results(idx).params = params; %#ok<SAGROW>
 end
 
 assignin('base', 'ct_project_results', results);
+
+% All Helper Functions
+function params = build_assignment_parameters()
+    params = struct();
+    params.n = 400.0;
+    params.gm = 0.001;
+    params.L1 = 26.526e-6;
+    params.L2 = 348.0e-6;
+    params.L3 = 348.0e-6;
+    params.M23 = 287.0e-6;
+    params.r1 = 0.005;
+    params.r2 = 0.4469;
+    params.r3 = 0.4469;
+    params.Rb = 0.1;
+    params.gb = 1.0 / params.Rb;
+    params.lambda0 = 0.1876;
+    params.i0 = 6.09109;
+    params.L0 = 2.36;
+    params.time_step = NaN;
+    params.gs1 = NaN;
+    params.gs2 = NaN;
+    params.gs3 = NaN;
+    params.wls_sample_index = 400;
+    params.time_series_stride = 1;
+    params.measurement_sigma = [ ...
+        0.005; ...
+        0.005; 0.005; 0.005; ...
+        0.0005; 0.0005; 0.0005; 0.005; 0.005; 0.0005; ...
+        0.00005; 0.00005; 0.00005; 0.00005; ...
+        0.0003; ...
+        0.05; 0.05; 0.05; 0.05; 0.05; ...
+        1.0];
+    params.wls_options = struct('max_iterations', 20, 'step_tolerance', 1e-8, ...
+        'residual_tolerance', 1e-8, 'damping', 1e-8);
+end
 
 function eventFiles = discover_comtrade_pairs(dataDir)
     files = dir(dataDir);
@@ -84,12 +123,10 @@ function eventFiles = discover_comtrade_pairs(dataDir)
             continue;
         end
 
-        if ~isfield(pairs, matlab.lang.makeValidName(baseName))
-            key = matlab.lang.makeValidName(baseName);
+        key = matlab.lang.makeValidName(baseName);
+        if ~isfield(pairs, key)
             pairs.(key) = struct('baseName', baseName, 'cfg', '', 'dat', '');
             keys{end + 1} = key; %#ok<AGROW>
-        else
-            key = matlab.lang.makeValidName(baseName);
         end
 
         fullPath = fullfile(dataDir, files(idx).name);
@@ -107,26 +144,60 @@ function eventFiles = discover_comtrade_pairs(dataDir)
     end
 end
 
+function timeStep = estimate_time_step(timeVector, sampleRateHz)
+    if numel(timeVector) > 1
+        diffs = diff(timeVector);
+        timeStep = median(diffs);
+    else
+        timeStep = 1.0 / sampleRateHz;
+    end
+
+    if ~isfinite(timeStep) || timeStep <= 0
+        timeStep = 1.0 / sampleRateHz;
+    end
+end
+
 function measurement = build_single_step_measurement(data, sampleIndex, params)
     measurement = struct();
     measurement.sample_index = sampleIndex;
     measurement.time = data.time(sampleIndex);
-    measurement.z = [data.v_out(sampleIndex); 0; 0; 0; 0];
-    measurement.labels = {'v_out', 'burden_consistency', 'flux_consistency', ...
-        'current_split', 'common_mode_reference'};
-    measurement.sigma = [5e-3; params.pseudo_measurement_sigma(:)];
+    measurement.z = [data.v_out(sampleIndex); zeros(20, 1)];
+    measurement.labels = { ...
+        'v_out', ...
+        'kcl_node0', 'kcl_node1', 'kcl_node2', ...
+        'kvl_loop_transformer', 'kvl_loop_upper', 'kvl_loop_lower', ...
+        'kcl_node3', 'kcl_node4', 'flux_derivative', ...
+        'y1_relation', 'y2_relation', 'y3_relation', 'y4_relation', ...
+        'magnetization', ...
+        'ibm_burden', 'ibm_l1', 'ibm_l2', 'ibm_l3', 'ibm_transformer', ...
+        'v4_reference'};
+    measurement.sigma = params.measurement_sigma(:);
 end
 
 function x0 = build_initial_guess(data, sampleIndex, params)
     vOut = data.v_out(sampleIndex);
-    iPrimary = (vOut / params.burden_resistance) * params.turns_ratio;
-    iMag = 0.05 * iPrimary;
-    lambda = params.magnetizing_inductance * iMag;
+    gbv = params.gb * vOut;
 
-    x0 = [vOut / 2; -vOut / 2; iPrimary; iMag; lambda];
+    x0 = zeros(16, 1);
+    x0(1) = vOut;
+    x0(2) = 0.0;
+    x0(3) = vOut;
+    x0(4) = 0.0;
+    x0(16) = -gbv;
+    x0(6) = x0(16);
+    x0(7) = x0(16);
+    x0(8) = -x0(16);
+    x0(9) = 0.0;
+    x0(11) = 0.0;
+    x0(5) = params.n * (params.gm * x0(11) + x0(9) - x0(16));
+    x0(10) = params.L0 * x0(9);
+    x0(12) = (x0(10) / params.lambda0) ^ 2;
+    x0(13) = x0(12) ^ 2;
+    x0(14) = x0(13) ^ 2;
+    x0(15) = x0(14) * x0(12);
 end
 
-function trajectory = run_time_series_estimation(data, params)
+function trajectory = run_time_series_estimation(data, params, stateInfo)
     stride = max(1, round(params.time_series_stride));
     sampleIndices = 1:stride:numel(data.v_out);
     sampleCount = numel(sampleIndices);
@@ -134,10 +205,10 @@ function trajectory = run_time_series_estimation(data, params)
     trajectory = struct();
     trajectory.sample_index = sampleIndices(:);
     trajectory.time = data.time(sampleIndices);
-    trajectory.state = zeros(sampleCount, 5);
-    trajectory.initial_guess = zeros(sampleCount, 5);
-    trajectory.predicted_measurement = zeros(sampleCount, 5);
-    trajectory.residual = zeros(sampleCount, 5);
+    trajectory.state = zeros(sampleCount, stateInfo.num_states);
+    trajectory.initial_guess = zeros(sampleCount, stateInfo.num_states);
+    trajectory.predicted_measurement = zeros(sampleCount, 21);
+    trajectory.residual = zeros(sampleCount, 21);
     trajectory.initial_residual_norm = zeros(sampleCount, 1);
     trajectory.final_residual_norm = zeros(sampleCount, 1);
     trajectory.chi_square = zeros(sampleCount, 1);
@@ -145,22 +216,26 @@ function trajectory = run_time_series_estimation(data, params)
     trajectory.converged = false(sampleCount, 1);
     trajectory.status = cell(sampleCount, 1);
 
-    previousState = [];
+    previousState = build_initial_guess(data, sampleIndices(1), params);
 
     for sampleIdx = 1:sampleCount
         k = sampleIndices(sampleIdx);
         measurement = build_single_step_measurement(data, k, params);
         weights = diag(1 ./ (measurement.sigma .^ 2));
 
-        if isempty(previousState)
-            x0 = build_initial_guess(data, k, params);
-        else
+        if sampleIdx == 1
+            xPrev = previousState;
             x0 = previousState;
-            x0(1) = data.v_out(k) / 2;
-            x0(2) = -data.v_out(k) / 2;
+        else
+            xPrev = previousState;
+            x0 = previousState;
+            x0(stateInfo.index.v1) = data.v_out(k);
+            x0(stateInfo.index.v3) = data.v_out(k);
+            x0(stateInfo.index.v2) = 0.0;
+            x0(stateInfo.index.v4) = 0.0;
         end
 
-        wlsResult = solve_wls_step(measurement.z, x0, params, weights, params.wls_options);
+        wlsResult = solve_wls_step(measurement.z, x0, xPrev, params, weights, params.wls_options);
         previousState = wlsResult.x;
 
         trajectory.initial_guess(sampleIdx, :) = x0(:).';
