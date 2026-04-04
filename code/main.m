@@ -10,6 +10,7 @@ params.turns_ratio = 200.0;
 params.magnetizing_inductance = 0.05;
 params.pseudo_measurement_sigma = [1e-3; 1e-3; 5e-3; 5e-3];
 params.wls_sample_index = 400;
+params.time_series_stride = 1;
 params.wls_options = struct('max_iterations', 15, 'step_tolerance', 1e-9, ...
     'residual_tolerance', 1e-9, 'damping', 1e-9);
 
@@ -25,13 +26,6 @@ for idx = 1:numel(eventFiles)
 
     data.baseline_current = (data.v_out ./ params.burden_resistance) .* params.turns_ratio;
 
-    plotSpec = struct();
-    plotSpec.showBaseline = true;
-    plotSpec.figureName = sprintf('%s Overview', data.event_name);
-    plotSpec.currentLabel = sprintf('Baseline i_p, R_b = %.3f ohm, n = %.1f', ...
-        params.burden_resistance, params.turns_ratio);
-    plot_comtrade(data, plotSpec);
-
     stateInfo = state_definition();
     sampleIndex = min(max(params.wls_sample_index, 1), numel(data.v_out));
     measurement = build_single_step_measurement(data, sampleIndex, params);
@@ -39,6 +33,23 @@ for idx = 1:numel(eventFiles)
 
     weights = diag(1 ./ (measurement.sigma .^ 2));
     wlsResult = solve_wls_step(measurement.z, x0, params, weights, params.wls_options);
+    trajectory = run_time_series_estimation(data, params);
+
+    data.estimated_current = trajectory.state(:, 3);
+    data.estimated_magnetizing_current = trajectory.state(:, 4);
+    data.estimated_flux = trajectory.state(:, 5);
+
+    plotSpec = struct();
+    plotSpec.showBaseline = true;
+    plotSpec.showEstimated = true;
+    plotSpec.showDiagnostics = true;
+    plotSpec.figureName = sprintf('%s Overview', data.event_name);
+    plotSpec.currentLabel = sprintf('Current Estimates, R_b = %.3f ohm, n = %.1f', ...
+        params.burden_resistance, params.turns_ratio);
+    plotSpec.diagnosticTime = trajectory.time;
+    plotSpec.residualNorm = trajectory.final_residual_norm;
+    plotSpec.chiSquare = trajectory.chi_square;
+    plot_comtrade(data, plotSpec);
 
     fprintf('\nEvent: %s\n', data.event_name);
     fprintf('  Samples: %d\n', numel(data.time));
@@ -47,11 +58,14 @@ for idx = 1:numel(eventFiles)
     fprintf('  Final residual norm:   %.6e\n', wlsResult.final_residual_norm);
     fprintf('  Chi-square:            %.6e\n', wlsResult.chi_square);
     fprintf('  Converged:             %d\n', wlsResult.converged);
+    fprintf('  Time-series converged: %d of %d samples\n', ...
+        sum(trajectory.converged), numel(trajectory.converged));
 
     results(idx).data = data; %#ok<SAGROW>
     results(idx).state_info = stateInfo; %#ok<SAGROW>
     results(idx).measurement = measurement; %#ok<SAGROW>
     results(idx).wls = wlsResult; %#ok<SAGROW>
+    results(idx).trajectory = trajectory; %#ok<SAGROW>
 end
 
 assignin('base', 'ct_project_results', results);
@@ -110,4 +124,54 @@ function x0 = build_initial_guess(data, sampleIndex, params)
     lambda = params.magnetizing_inductance * iMag;
 
     x0 = [vOut / 2; -vOut / 2; iPrimary; iMag; lambda];
+end
+
+function trajectory = run_time_series_estimation(data, params)
+    stride = max(1, round(params.time_series_stride));
+    sampleIndices = 1:stride:numel(data.v_out);
+    sampleCount = numel(sampleIndices);
+
+    trajectory = struct();
+    trajectory.sample_index = sampleIndices(:);
+    trajectory.time = data.time(sampleIndices);
+    trajectory.state = zeros(sampleCount, 5);
+    trajectory.initial_guess = zeros(sampleCount, 5);
+    trajectory.predicted_measurement = zeros(sampleCount, 5);
+    trajectory.residual = zeros(sampleCount, 5);
+    trajectory.initial_residual_norm = zeros(sampleCount, 1);
+    trajectory.final_residual_norm = zeros(sampleCount, 1);
+    trajectory.chi_square = zeros(sampleCount, 1);
+    trajectory.iterations = zeros(sampleCount, 1);
+    trajectory.converged = false(sampleCount, 1);
+    trajectory.status = cell(sampleCount, 1);
+
+    previousState = [];
+
+    for sampleIdx = 1:sampleCount
+        k = sampleIndices(sampleIdx);
+        measurement = build_single_step_measurement(data, k, params);
+        weights = diag(1 ./ (measurement.sigma .^ 2));
+
+        if isempty(previousState)
+            x0 = build_initial_guess(data, k, params);
+        else
+            x0 = previousState;
+            x0(1) = data.v_out(k) / 2;
+            x0(2) = -data.v_out(k) / 2;
+        end
+
+        wlsResult = solve_wls_step(measurement.z, x0, params, weights, params.wls_options);
+        previousState = wlsResult.x;
+
+        trajectory.initial_guess(sampleIdx, :) = x0(:).';
+        trajectory.state(sampleIdx, :) = wlsResult.x(:).';
+        trajectory.predicted_measurement(sampleIdx, :) = wlsResult.predicted_measurement(:).';
+        trajectory.residual(sampleIdx, :) = wlsResult.residual(:).';
+        trajectory.initial_residual_norm(sampleIdx) = wlsResult.initial_residual_norm;
+        trajectory.final_residual_norm(sampleIdx) = wlsResult.final_residual_norm;
+        trajectory.chi_square(sampleIdx) = wlsResult.chi_square;
+        trajectory.iterations(sampleIdx) = wlsResult.iterations;
+        trajectory.converged(sampleIdx) = wlsResult.converged;
+        trajectory.status{sampleIdx} = wlsResult.status;
+    end
 end

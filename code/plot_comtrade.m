@@ -6,7 +6,11 @@ function fig = plot_comtrade(dataStruct, plotSpec)
     plotSpec = apply_plot_defaults(plotSpec);
 
     fig = figure('Name', plotSpec.figureName, 'Color', 'w');
-    subplot(2, 1, 1);
+    if plotSpec.showDiagnostics
+        subplot(4, 1, 1);
+    else
+        subplot(2, 1, 1);
+    end
 
     plot(dataStruct.time, dataStruct.v_out, 'LineWidth', 1.2, 'Color', [0 0.35 0.7]);
     grid on;
@@ -14,10 +18,23 @@ function fig = plot_comtrade(dataStruct, plotSpec)
     ylabel(sprintf('Voltage (%s)', dataStruct.channel_info(1).units));
     title(sprintf('%s: Burden Voltage', dataStruct.event_name), 'Interpreter', 'none');
 
-    subplot(2, 1, 2);
+    if plotSpec.showDiagnostics
+        subplot(4, 1, 2);
+    else
+        subplot(2, 1, 2);
+    end
+
     if plotSpec.showBaseline && isfield(dataStruct, 'baseline_current')
         plot(dataStruct.time, dataStruct.baseline_current, 'LineWidth', 1.2, ...
             'Color', [0.8 0.25 0.1]);
+        hold on;
+
+        if plotSpec.showEstimated && isfield(dataStruct, 'estimated_current')
+            plot(dataStruct.time, dataStruct.estimated_current, 'LineWidth', 1.2, ...
+                'Color', [0.15 0.55 0.15]);
+            legend({'Baseline i_p', 'Estimated i_p'}, 'Location', 'best');
+        end
+        hold off;
         ylabel('Current (A)');
         title(plotSpec.currentLabel, 'Interpreter', 'none');
     else
@@ -28,6 +45,24 @@ function fig = plot_comtrade(dataStruct, plotSpec)
     end
     grid on;
     xlabel('Time (s)');
+
+    if plotSpec.showDiagnostics
+        subplot(4, 1, 3);
+        plot(plotSpec.diagnosticTime, plotSpec.residualNorm, 'LineWidth', 1.1, ...
+            'Color', [0.55 0.2 0.75]);
+        grid on;
+        xlabel('Time (s)');
+        ylabel('||r||_2');
+        title('Final Residual Norm', 'Interpreter', 'none');
+
+        subplot(4, 1, 4);
+        plot(plotSpec.diagnosticTime, plotSpec.chiSquare, 'LineWidth', 1.1, ...
+            'Color', [0.15 0.15 0.15]);
+        grid on;
+        xlabel('Time (s)');
+        ylabel('\chi^2');
+        title('Chi-Square Statistic', 'Interpreter', 'tex');
+    end
 end
 
 function plotSpec = apply_plot_defaults(plotSpec)
@@ -39,5 +74,20 @@ function plotSpec = apply_plot_defaults(plotSpec)
     end
     if ~isfield(plotSpec, 'currentLabel') || isempty(plotSpec.currentLabel)
         plotSpec.currentLabel = 'Baseline Current Estimate';
+    end
+    if ~isfield(plotSpec, 'showEstimated')
+        plotSpec.showEstimated = false;
+    end
+    if ~isfield(plotSpec, 'showDiagnostics')
+        plotSpec.showDiagnostics = false;
+    end
+    if ~isfield(plotSpec, 'diagnosticTime')
+        plotSpec.diagnosticTime = [];
+    end
+    if ~isfield(plotSpec, 'residualNorm')
+        plotSpec.residualNorm = [];
+    end
+    if ~isfield(plotSpec, 'chiSquare')
+        plotSpec.chiSquare = [];
     end
 end
