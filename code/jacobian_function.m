@@ -4,16 +4,11 @@ function J = jacobian_function(xk, xkm1, params)
             'jacobian_function expects current state, previous state, and params.');
     end
 
-    if numel(xk) ~= 16 || numel(xkm1) ~= 16
+    if numel(xk) ~= 11 || numel(xkm1) ~= 11
         error('jacobian_function:InvalidStateVector', ...
-            'jacobian_function expects 16-element current and previous state vectors.');
+            'jacobian_function expects 11-element current and previous state vectors.');
     end
 
-    lambda = xk(10);
-    y1 = xk(12);
-    y2 = xk(13);
-    y3 = xk(14);
-    y4 = xk(15);
     dt = params.time_step;
 
     d1 = params.gs1 * params.L1 / dt;
@@ -22,7 +17,7 @@ function J = jacobian_function(xk, xkm1, params)
     d3 = params.gs3 * params.L3 / dt;
     dm23_3 = params.gs3 * params.M23 / dt;
 
-    J = zeros(21, 16);
+    J = zeros(14, 11);
 
     J(1, [3 4]) = [1 -1];
 
@@ -73,42 +68,8 @@ function J = jacobian_function(xk, xkm1, params)
     J(10, 10) = -1 / dt;
     J(10, 11) = 1;
 
-    J(11, 10) = -2 * lambda / (params.lambda0 ^ 2);
-    J(11, 12) = 1;
-
-    J(12, 12) = -2 * y1;
-    J(12, 13) = 1;
-
-    J(13, 13) = -2 * y2;
-    J(13, 14) = 1;
-
-    J(14, 12) = -y3;
-    J(14, 14) = -y1;
-    J(14, 15) = 1;
-
-    J(15, 9) = 1;
-    J(15, 10) = -(params.i0 / params.lambda0) * y4 - (1 / params.L0);
-    J(15, 15) = -params.i0 * (lambda / params.lambda0);
-
-    J(16, 3) = params.gb;
-    J(16, 4) = -params.gb;
-    J(16, 16) = 1;
-
-    J(17, 6) = -1 - d1;
-    J(17, 16) = 1;
-
-    J(18, 7) = -1 - d2;
-    J(18, 8) = dm23_2;
-    J(18, 16) = 1;
-
-    J(19, 7) = -dm23_3;
-    J(19, 8) = 1 + d3;
-    J(19, 16) = 1;
-
-    J(20, 5) = 1 / params.n;
-    J(20, 9) = -1;
-    J(20, 11) = -params.gm;
-    J(20, 16) = 1;
-
-    J(21, 4) = 1;
+    J(11, 4) = 1;
+    J(12, 9) = 1;
+    J(13, 10) = 1;
+    J(14, 11) = 1;
 end

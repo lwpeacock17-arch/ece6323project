@@ -76,6 +76,10 @@ function data = read_comtrade(cfgPath, datPath)
     data.metadata = struct();
     data.metadata.cfg_line_count = numel(cfgLines);
     data.metadata.dat_sample_count = size(rawMatrix, 1);
+    data.metadata.quantization_step = abs(data.channel_info(1).scale_a);
+    data.metadata.quantization_sigma = data.metadata.quantization_step / sqrt(12);
+    data.metadata.raw_min = data.channel_info(1).min_raw;
+    data.metadata.raw_max = data.channel_info(1).max_raw;
 end
 
 function lines = read_text_lines(filePath)

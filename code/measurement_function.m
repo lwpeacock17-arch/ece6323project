@@ -14,7 +14,7 @@ function h = measurement_function(xk, xkm1, params)
     coupling23 = params.L2 * deriv.diL2_dt - params.M23 * deriv.diL3_dt;
     coupling32 = params.L3 * deriv.diL3_dt - params.M23 * deriv.diL2_dt;
 
-    h = zeros(21, 1);
+    h = zeros(14, 1);
     h(1) = current.v3 - current.v4;
     h(2) = -params.gm * current.e - current.im + (current.ip / params.n) + ...
         current.iL1 + params.gs1 * params.L1 * deriv.diL1_dt;
@@ -31,24 +31,16 @@ function h = measurement_function(xk, xkm1, params)
     h(8) = current.iL2 + params.gs2 * coupling23 + params.gb * (current.v3 - current.v4);
     h(9) = -current.iL3 - params.gs3 * coupling32 + params.gb * (current.v4 - current.v3);
     h(10) = current.e - deriv.dlambda_dt;
-    h(11) = current.y1 - (current.lambda / params.lambda0) ^ 2;
-    h(12) = current.y2 - current.y1 ^ 2;
-    h(13) = current.y3 - current.y2 ^ 2;
-    h(14) = current.y4 - current.y3 * current.y1;
-    h(15) = current.im - params.i0 * (current.lambda / params.lambda0) * current.y4 - ...
-        (current.lambda / params.L0);
-    h(16) = current.ibm + params.gb * (current.v3 - current.v4);
-    h(17) = current.ibm - current.iL1 - params.gs1 * params.L1 * deriv.diL1_dt;
-    h(18) = current.ibm - current.iL2 - params.gs2 * coupling23;
-    h(19) = current.ibm + current.iL3 + params.gs3 * coupling32;
-    h(20) = current.ibm - params.gm * current.e - current.im + (current.ip / params.n);
-    h(21) = current.v4;
+    h(11) = current.v4;
+    h(12) = current.im;
+    h(13) = current.lambda;
+    h(14) = current.e;
 end
 
 function validate_state_vector(x)
-    if numel(x) ~= 16
+    if numel(x) ~= 11
         error('measurement_function:InvalidStateVector', ...
-            'Expected a 16-element state vector, got %d elements.', numel(x));
+            'Expected an 11-element state vector, got %d elements.', numel(x));
     end
 end
 
@@ -65,11 +57,6 @@ function state = unpack_state(x)
     state.im = x(9);
     state.lambda = x(10);
     state.e = x(11);
-    state.y1 = x(12);
-    state.y2 = x(13);
-    state.y3 = x(14);
-    state.y4 = x(15);
-    state.ibm = x(16);
 end
 
 function deriv = compute_derivatives(current, previous, dt)

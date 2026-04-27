@@ -28,14 +28,13 @@ for idx = 1:numel(eventFiles)
     measurement = build_single_step_measurement(data, sampleIndex, params);
     xPrev = build_initial_guess(data, sampleIndex - 1, params);
     x0 = build_initial_guess(data, sampleIndex, params);
-    measurement.sigma = apply_cable_error_corrections( ...
-        measurement.sigma, measurement.labels, x0, params, stateInfo);
 
     weights = diag(1 ./ (measurement.sigma .^ 2));
     wlsResult = solve_wls_step(measurement.z, x0, xPrev, params, weights, params.wls_options);
     trajectory = run_time_series_estimation(data, params, stateInfo);
 
     data.estimated_current = trajectory.state(:, stateInfo.index.ip);
+    data.estimated_burden_current = trajectory.state(:, stateInfo.index.ibm);
     data.estimated_magnetizing_current = trajectory.state(:, stateInfo.index.im);
     data.estimated_flux = trajectory.state(:, stateInfo.index.lambda);
 
@@ -49,22 +48,16 @@ for idx = 1:numel(eventFiles)
     plotSpec.diagnosticTime = trajectory.time;
     plotSpec.residualNorm = trajectory.final_residual_norm;
     plotSpec.chiSquare = trajectory.chi_square;
-    plotSpec.showResidualBreakdown = true;
-    plotSpec.residualMatrix = trajectory.residual;
-    plotSpec.residualLabels = measurement.labels;
     plot_comtrade(data, plotSpec);
 
     fprintf('\nEvent: %s\n', data.event_name);
     fprintf('  Samples: %d\n', numel(data.time));
     fprintf('  Time step: %.9f s\n', params.time_step);
-    fprintf('  Quantization sigma:    %.6e V\n', data.metadata.quantization_sigma);
     fprintf('  WLS sample index: %d\n', sampleIndex);
     fprintf('  Initial residual norm: %.6e\n', wlsResult.initial_residual_norm);
     fprintf('  Final residual norm:   %.6e\n', wlsResult.final_residual_norm);
     fprintf('  Chi-square:            %.6e\n', wlsResult.chi_square);
     fprintf('  Converged:             %d\n', wlsResult.converged);
-    fprintf('  Iterations:            %d\n', wlsResult.iterations);
-    fprintf('  Status:                %s\n', wlsResult.status);
     fprintf('  Time-series converged: %d of %d samples\n', ...
         sum(trajectory.converged), numel(trajectory.converged));
 
@@ -78,7 +71,7 @@ end
 
 assignin('base', 'ct_project_results', results);
 
-% All Helper Functions
+% Values Given in the assignment
 function params = build_assignment_parameters()
     params = struct();
     params.n = 400.0;
@@ -95,11 +88,6 @@ function params = build_assignment_parameters()
     params.lambda0 = 0.1876;
     params.i0 = 6.09109;
     params.L0 = 2.36;
-    params.quantization_sigma_scale = 1.0;
-    params.cable_uncertainty = struct( ...
-        'current_relative', 0.02, ...
-        'voltage_relative', 0.02, ...
-        'minimum_sigma_floor', 1e-4);
     params.time_step = NaN;
     params.gs1 = NaN;
     params.gs2 = NaN;
@@ -110,8 +98,10 @@ function params = build_assignment_parameters()
         0.005; ...
         0.005; 0.005; 0.005; ...
         0.0005; 0.0005; 0.0005; 0.005; 0.005; 0.0005; ...
-        1.0; ...
-        5.0; 0.5; 5.0];
+        0.00005; 0.00005; 0.00005; 0.00005; ...
+        0.0003; ...
+        0.05; 0.05; 0.05; 0.05; 0.05; ...
+        1.0];
     params.wls_options = struct('max_iterations', 20, 'step_tolerance', 1e-8, ...
         'residual_tolerance', 1e-8, 'damping', 1e-8);
 end
@@ -168,33 +158,40 @@ function measurement = build_single_step_measurement(data, sampleIndex, params)
     measurement = struct();
     measurement.sample_index = sampleIndex;
     measurement.time = data.time(sampleIndex);
-    measurement.z = [data.v_out(sampleIndex); zeros(13, 1)];
+    measurement.z = [data.v_out(sampleIndex); zeros(20, 1)];
     measurement.labels = { ...
         'v_out', ...
         'kcl_node0', 'kcl_node1', 'kcl_node2', ...
         'kvl_loop_transformer', 'kvl_loop_upper', 'kvl_loop_lower', ...
-        'kcl_node3', 'kcl_node4', 'flux_derivative', 'v4_reference', ...
-        'prior_im', 'prior_lambda', 'prior_e'};
-    measurement.sigma = apply_measurement_error_corrections( ...
-        params.measurement_sigma(:), data, sampleIndex, params);
+        'kcl_node3', 'kcl_node4', 'flux_derivative', ...
+        'y1_relation', 'y2_relation', 'y3_relation', 'y4_relation', ...
+        'magnetization', ...
+        'ibm_burden', 'ibm_l1', 'ibm_l2', 'ibm_l3', 'ibm_transformer', ...
+        'v4_reference'};
+    measurement.sigma = params.measurement_sigma(:);
 end
 
 function x0 = build_initial_guess(data, sampleIndex, params)
     vOut = data.v_out(sampleIndex);
     gbv = params.gb * vOut;
 
-    x0 = zeros(11, 1);
+    x0 = zeros(16, 1);
     x0(1) = vOut;
     x0(2) = 0.0;
     x0(3) = vOut;
     x0(4) = 0.0;
-    x0(6) = -gbv;
-    x0(7) = -gbv;
-    x0(8) = gbv;
+    x0(16) = -gbv;
+    x0(6) = x0(16);
+    x0(7) = x0(16);
+    x0(8) = -x0(16);
     x0(9) = 0.0;
     x0(11) = 0.0;
-    x0(5) = params.n * (-x0(6) + params.gm * x0(11) + x0(9));
+    x0(5) = params.n * (params.gm * x0(11) + x0(9) - x0(16));
     x0(10) = params.L0 * x0(9);
+    x0(12) = (x0(10) / params.lambda0) ^ 2;
+    x0(13) = x0(12) ^ 2;
+    x0(14) = x0(13) ^ 2;
+    x0(15) = x0(14) * x0(12);
 end
 
 function trajectory = run_time_series_estimation(data, params, stateInfo)
@@ -207,8 +204,8 @@ function trajectory = run_time_series_estimation(data, params, stateInfo)
     trajectory.time = data.time(sampleIndices);
     trajectory.state = zeros(sampleCount, stateInfo.num_states);
     trajectory.initial_guess = zeros(sampleCount, stateInfo.num_states);
-    trajectory.predicted_measurement = zeros(sampleCount, 14);
-    trajectory.residual = zeros(sampleCount, 14);
+    trajectory.predicted_measurement = zeros(sampleCount, 21);
+    trajectory.residual = zeros(sampleCount, 21);
     trajectory.initial_residual_norm = zeros(sampleCount, 1);
     trajectory.final_residual_norm = zeros(sampleCount, 1);
     trajectory.chi_square = zeros(sampleCount, 1);
@@ -221,6 +218,7 @@ function trajectory = run_time_series_estimation(data, params, stateInfo)
     for sampleIdx = 1:sampleCount
         k = sampleIndices(sampleIdx);
         measurement = build_single_step_measurement(data, k, params);
+        weights = diag(1 ./ (measurement.sigma .^ 2));
 
         if sampleIdx == 1
             xPrev = previousState;
@@ -233,10 +231,6 @@ function trajectory = run_time_series_estimation(data, params, stateInfo)
             x0(stateInfo.index.v2) = 0.0;
             x0(stateInfo.index.v4) = 0.0;
         end
-
-        measurement.sigma = apply_cable_error_corrections( ...
-            measurement.sigma, measurement.labels, x0, params, stateInfo);
-        weights = diag(1 ./ (measurement.sigma .^ 2));
 
         wlsResult = solve_wls_step(measurement.z, x0, xPrev, params, weights, params.wls_options);
         previousState = wlsResult.x;
@@ -251,63 +245,5 @@ function trajectory = run_time_series_estimation(data, params, stateInfo)
         trajectory.iterations(sampleIdx) = wlsResult.iterations;
         trajectory.converged(sampleIdx) = wlsResult.converged;
         trajectory.status{sampleIdx} = wlsResult.status;
-    end
-end
-
-function sigma = apply_measurement_error_corrections(baseSigma, data, sampleIndex, params)
-    sigma = baseSigma;
-
-    quantSigma = params.quantization_sigma_scale * data.metadata.quantization_sigma;
-    sigma(1) = sqrt(baseSigma(1) ^ 2 + quantSigma ^ 2);
-
-    if sampleIndex >= 1 && sampleIndex <= numel(data.analog_raw)
-        rawValue = data.analog_raw(sampleIndex, 1);
-        nearRail = abs(rawValue - data.metadata.raw_min) < 5 || ...
-            abs(rawValue - data.metadata.raw_max) < 5;
-        if nearRail
-            sigma(1) = max(sigma(1), 3 * quantSigma);
-        end
-    end
-end
-
-function sigma = apply_cable_error_corrections(baseSigma, measurementLabels, xRef, params, stateInfo)
-    sigma = baseSigma;
-
-    voltageScale = max([ ...
-        abs(xRef(stateInfo.index.v1) - xRef(stateInfo.index.v3)), ...
-        abs(xRef(stateInfo.index.v2) - xRef(stateInfo.index.v4)), ...
-        abs(xRef(stateInfo.index.v3) - xRef(stateInfo.index.v4)), ...
-        params.cable_uncertainty.minimum_sigma_floor]);
-
-    currentScale = max([ ...
-        abs(xRef(stateInfo.index.iL2)), ...
-        abs(xRef(stateInfo.index.iL3)), ...
-        abs(xRef(stateInfo.index.iL1)), ...
-        params.cable_uncertainty.minimum_sigma_floor]);
-
-    cableVoltageSigma = params.cable_uncertainty.voltage_relative * voltageScale;
-    cableCurrentSigma = params.cable_uncertainty.current_relative * currentScale;
-
-    currentDrivenLabels = {'kcl_node1', 'kcl_node2', 'kcl_node3', 'kcl_node4'};
-    voltageDrivenLabels = {'kvl_loop_upper', 'kvl_loop_lower'};
-
-    currentDrivenIdx = find_label_indices(measurementLabels, currentDrivenLabels);
-    voltageDrivenIdx = find_label_indices(measurementLabels, voltageDrivenLabels);
-
-    if ~isempty(currentDrivenIdx)
-        sigma(currentDrivenIdx) = sqrt(sigma(currentDrivenIdx) .^ 2 + cableCurrentSigma ^ 2);
-    end
-    if ~isempty(voltageDrivenIdx)
-        sigma(voltageDrivenIdx) = sqrt(sigma(voltageDrivenIdx) .^ 2 + cableVoltageSigma ^ 2);
-    end
-end
-
-function indices = find_label_indices(measurementLabels, targetLabels)
-    indices = [];
-    for idx = 1:numel(targetLabels)
-        match = find(strcmp(measurementLabels, targetLabels{idx}));
-        if ~isempty(match)
-            indices(end + 1) = match(1); %#ok<AGROW>
-        end
     end
 end
