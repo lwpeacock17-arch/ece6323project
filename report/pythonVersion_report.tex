@@ -1,0 +1,491 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+
+\pgfplotsset{compat=1.18}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  citecolor=blue!60!black
+}
+
+\newcommand{\coursename}{ECE6323 -- Power System Protection}
+\newcommand{\projecttitle}{The Intelligent Merging Unit: Error Correction by Dynamic State Estimation}
+\newcommand{\studentname}{Lucas W Peacock}
+\newcommand{\partnername}{Leah Kathryn Bryan}
+\newcommand{\sectionname}{ECE6323-Q}
+\newcommand{\submissiondate}{April 2026}
+
+\title{\projecttitle \\[0.4em] \large Final Report}
+\author{\studentname \\ \partnername \\ \coursename \\ \sectionname}
+\date{\submissiondate}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction and Scope}
+The purpose of this project is to estimate the \emph{primary current} of a current transformer (CT)
+from the measured burden-side signal available at the merging unit. In the provided data set, the
+only directly measured analog quantity is the burden voltage, denoted by $v_{\text{out}}(t)$. The
+project objective is to use a model of the CT instrumentation channel together with dynamic state
+estimation (DSE) to reconstruct the primary current waveform and other internal states of the
+measurement channel.
+
+The instrumentation channel considered in this assignment includes the current transformer, the
+interconnecting cable, and the burden/input circuit of the merging unit. The assignment emphasizes
+that instrumentation-channel errors can distort measured waveforms and, in severe cases, contribute
+to protection-system misoperation. The practical motivation is therefore to create an
+``intelligent merging unit'' that can stream corrected estimates of the primary electrical quantity
+instead of simply forwarding the raw secondary-side measurement.
+
+This report covers the full implementation requested by the assignment:
+\begin{enumerate}[label=\textbf{Task \arabic*:}, leftmargin=1.25in]
+  \item Development of a simple user-facing output workflow for inspecting data and results.
+  \item Reading COMTRADE files.
+  \item Formulating the current instrumentation-channel state model.
+  \item Building actual, virtual, derived, and pseudo measurements.
+  \item Solving the dynamic state estimation problem.
+  \item Processing the provided event files and summarizing the estimated states.
+\end{enumerate}
+
+The final implementation is aimed at producing:
+\begin{itemize}
+  \item the estimated primary current $i_p(t)$,
+  \item estimated internal CT flux $\lambda(t)$,
+  \item internal channel states such as node voltages and branch currents,
+  \item consistency/confidence metrics,
+  \item a visual dashboard for the two provided test events.
+\end{itemize}
+
+\section{Problem Formulation}
+\subsection{Measurement Setting}
+The current instrumentation channel is observed at the burden resistor of the merging unit. The
+available COMTRADE files contain one analog channel labeled \texttt{Burden\_Voltage}. Therefore,
+the estimator does not receive direct measurements of primary current, secondary current, or line
+voltage. Instead, those quantities must be reconstructed from the burden voltage and the channel
+model.
+
+For the current instrumentation channel, the assignment defines the instrumentation error as
+\begin{equation}
+\varepsilon = \frac{\left| k\,i_s(t) - i_p(t) \right|}{I_{\text{range}}},
+\end{equation}
+where $i_s(t)$ is the secondary current, $i_p(t)$ is the primary current, $k$ is the nominal CT
+ratio, and $I_{\text{range}}$ is the primary-side measurement range. The project focuses on
+reducing this error by estimating the best primary-side state that explains the burden-side
+measurement.
+
+\subsection{State Vector}
+Following the quadratized model in Appendix A, the estimator uses a 15-state vector:
+\begin{equation}
+\mathbf{x}(t) =
+\begin{bmatrix}
+v_1 & v_2 & v_3 & v_4 & e & \lambda & y_1 & y_2 & y_3 & y_4 & i_p & i_m & i_{L1} & i_{L2} & i_{L3}
+\end{bmatrix}^{T}.
+\end{equation}
+
+The states have the following interpretation:
+\begin{itemize}
+  \item $v_1$ through $v_4$: internal node voltages of the equivalent circuit,
+  \item $e$: transformer-induced voltage,
+  \item $\lambda$: CT core magnetic flux,
+  \item $i_p$: primary current to be estimated,
+  \item $i_m$: magnetizing current,
+  \item $i_{L1}$, $i_{L2}$, $i_{L3}$: branch currents in the instrumentation channel,
+  \item $y_1$ through $y_4$: auxiliary variables introduced to quadratize the nonlinear
+  magnetizing-current relationship.
+\end{itemize}
+
+\subsection{Measurement Models}
+The assignment specifies 21 equations in the quadratized formulation:
+\begin{itemize}
+  \item 1 actual measurement,
+  \item 10 virtual circuit equations,
+  \item 5 derived measurements,
+  \item 1 pseudo-measurement,
+  \item 4 quadratization relationships.
+\end{itemize}
+
+The actual measurement is
+\begin{equation}
+v_{\text{out}}(t) = v_3(t) - v_4(t).
+\end{equation}
+
+The estimator also uses Kirchhoff current law (KCL), Kirchhoff voltage law (KVL), the flux
+equation, and the quadratized magnetizing branch relationships as virtual/derived constraints.
+Because the project has only one direct sensor waveform, these model equations are essential for
+making the state observable.
+
+\subsection{Weighted Least-Squares Dynamic State Estimation}
+Let the measurement vector be $\mathbf{z}$ and the nonlinear model be $\mathbf{h}(\mathbf{x})$.
+The weighted least-squares objective is
+\begin{equation}
+J(\mathbf{x}) = \left( \mathbf{z} - \mathbf{h}(\mathbf{x}) \right)^T
+\mathbf{W}
+\left( \mathbf{z} - \mathbf{h}(\mathbf{x}) \right),
+\end{equation}
+where $\mathbf{W}$ is a diagonal matrix formed from the inverse variances of the measurement
+errors.
+
+The state update is computed using a Gauss--Newton step:
+\begin{equation}
+\hat{\mathbf{x}}_{k+1}
+=
+\hat{\mathbf{x}}_{k}
++
+\left( \mathbf{H}^{T}\mathbf{W}\mathbf{H} \right)^{-1}
+\mathbf{H}^{T}\mathbf{W}
+\left( \mathbf{z} - \mathbf{h}(\hat{\mathbf{x}}_{k}) \right),
+\end{equation}
+where $\mathbf{H}$ is the Jacobian matrix of the measurement equations.
+
+\subsection{Expected Outputs}
+The main output of interest is the estimated primary current waveform $i_p(t)$. Additional outputs
+include:
+\begin{itemize}
+  \item estimated CT flux $\lambda(t)$,
+  \item estimated internal node voltages and branch currents,
+  \item derived burden-current consistency,
+  \item confidence/residual metrics,
+  \item visual plots for the two test events.
+\end{itemize}
+
+\section{Solution Methodology -- Description of the Algorithm}
+\subsection{Task 0: User-Facing Output and Visualization}
+To satisfy the requirement for reporting simulated data, intermediate values, and relay-relevant
+results, the solution produces:
+\begin{itemize}
+  \item \texttt{results.csv} containing per-sample estimated quantities,
+  \item \texttt{residuals.csv} containing per-sample residuals for all measurement equations,
+  \item \texttt{summary.json} containing aggregate statistics,
+  \item an HTML dashboard with tabs for Event 01 and Event 02.
+\end{itemize}
+The dashboard provides a compact visual summary of the burden voltage, estimated primary current,
+estimated flux, confidence, and normalized residual behavior for each event.
+
+\subsection{Task 1: COMTRADE Reader}
+The implementation reads the COMTRADE configuration (\texttt{.cfg}) file to determine:
+\begin{itemize}
+  \item number of analog channels,
+  \item channel names and units,
+  \item scale factors $a$ and offsets $b$,
+  \item sample rate and file type.
+\end{itemize}
+
+The ASCII \texttt{.dat} file is then parsed line by line. Each raw analog sample is converted to a
+physical value using
+\begin{equation}
+x_{\text{physical}} = a x_{\text{raw}} + b.
+\end{equation}
+
+For both provided events, the parser confirmed that the data set contains only one analog channel:
+\texttt{Burden\_Voltage}.
+
+\subsection{Task 2: Mathematical Model of the Instrumentation Channel}
+The channel is modeled with the assignment parameters:
+\begin{itemize}
+  \item CT turns ratio $n = 400$,
+  \item inductances $L_1$, $L_2$, $L_3$ and mutual inductance $M_{23}$,
+  \item burden conductance $g_b = 1/R_b$ with $R_b = 0.1 \, \Omega$,
+  \item magnetizing branch parameters $(i_0, \lambda_0, L_0)$,
+  \item cable and winding resistances $r_1$, $r_2$, $r_3$.
+\end{itemize}
+
+The model uses the equivalent-circuit relationships given in Appendix A. The nonlinear
+magnetizing-current relation is quadratized using the auxiliary variables $y_1$ through $y_4$ so
+that the final estimator operates on a quadratic-algebraic measurement model.
+
+\subsection{Task 3: Measurement Construction}
+The algorithm builds a 21-element measurement vector at each sample. It contains:
+\begin{enumerate}[label=\alph*)]
+  \item the actual burden-voltage measurement,
+  \item zero-valued virtual measurements enforcing KCL/KVL and flux equations,
+  \item derived burden-current measurements implied by the burden voltage,
+  \item a pseudo-measurement that anchors the grounded node.
+\end{enumerate}
+
+Because only one direct waveform is available, the virtual and derived equations are important.
+They do not add new sensor information, but they encode the physical laws that the estimated state
+must obey.
+
+\subsection{Task 4: Dynamic State Estimation Algorithm}
+The estimator proceeds sample by sample. At each time step:
+\begin{enumerate}
+  \item the burden-voltage sample is read from the COMTRADE data,
+  \item a measurement vector is formed,
+  \item an initial state guess is constructed from the previous state and the burden current
+  implied by $v_{\text{out}}$,
+  \item the nonlinear measurement model is solved with a damped Gauss--Newton iteration,
+  \item a chi-square style consistency metric is computed from the weighted residuals.
+\end{enumerate}
+
+To represent the dynamic terms, derivatives are approximated using the previous solved state and
+the current sample interval:
+\begin{equation}
+\frac{d x(t)}{dt} \approx \frac{x_k - x_{k-1}}{\Delta t}.
+\end{equation}
+
+This sequential update makes the estimator a practical dynamic solver while still keeping the
+implementation computationally light enough for the project data set.
+
+\subsection{Task 5: Event Processing Workflow}
+The two provided COMTRADE events were processed independently. The algorithm reads one event at a
+time, evaluates every sample sequentially, records the estimated state, and then writes the
+results to output files for later analysis and visualization.
+
+\subsection{Task 6: Summary Variables Reported}
+The reported outputs include:
+\begin{itemize}
+  \item estimated primary current $i_p(t)$,
+  \item estimated magnetic flux $\lambda(t)$,
+  \item estimated induced voltage $e(t)$,
+  \item sample-wise consistency/confidence values,
+  \item maximum normalized residuals,
+  \item event summary statistics.
+\end{itemize}
+
+\section{Presentation of Results}
+\subsection{Input Events}
+The assignment provides two fault/disturbance events with different degrees of CT saturation. Both
+events contain 4700 samples at approximately 4.8 kHz. Event 02 is visibly more severe than Event
+01 based on the burden-voltage swing and the resulting internal-state magnitudes.
+
+\subsection{Event Summary}
+Table~\ref{tab:summary} summarizes the principal numerical outputs from the estimator.
+
+\begin{table}[H]
+  \centering
+  \caption{Summary of estimated event results}
+  \label{tab:summary}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{2.6in}cc}
+    \toprule
+    Metric & Event 01 & Event 02 \\
+    \midrule
+    Number of samples & 4700 & 4700 \\
+    Converged samples & 4700 & 4700 \\
+    Mean confidence & 1.0000 & 1.0000 \\
+    Minimum confidence & 1.0000 & 1.0000 \\
+    Maximum estimated primary current (A) & 4190.121 & 19052.104 \\
+    Minimum estimated primary current (A) & -5857.761 & -27757.416 \\
+    Maximum estimated flux (Wb) & 0.008401 & 0.087216 \\
+    Maximum absolute normalized residual & $1.55 \times 10^{-5}$ & $1.75 \times 10^{-5}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Discussion of Results}
+Several observations are immediate:
+\begin{enumerate}
+  \item Event 02 produces a much larger estimated primary-current excursion than Event 01.
+  \item Event 02 also produces significantly higher estimated CT flux, indicating a more severe
+  saturation case.
+  \item The burden-voltage waveform alone is sufficient, in this model-based framework, to drive a
+  full state estimate of the instrumentation channel.
+  \item The confidence metric is very high after enforcing the model constraints consistently.
+\end{enumerate}
+
+The most important engineering result is that Event 02 stresses the instrumentation channel much
+more strongly than Event 01. This agrees with the assignment statement that the two files were
+constructed to represent different degrees of CT saturation.
+
+\subsection{Event Waveforms and Chi-Square Trends}
+Figures~\ref{fig:burden-voltage-events} and~\ref{fig:chi-square-events} provide direct visual
+evidence of the difference in severity between the two events. The burden-voltage plot shows that
+Event 02 has a substantially larger excursion than Event 01, which is consistent with a more
+heavily stressed instrumentation channel. The chi-square plot shows the numerical consistency of
+the solved estimate at each time sample.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.9\textwidth,
+      height=2.8in,
+      grid=both,
+      grid style={line width=0.1pt, draw=gray!20},
+      major grid style={line width=0.2pt, draw=gray!35},
+      xlabel={Time (s)},
+      ylabel={Burden Voltage (V)},
+      title={Measured Burden Voltage for Event 01 and Event 02},
+      legend style={at={(0.02,0.98)}, anchor=north west, draw=none, fill=white},
+      yticklabel style={/pgf/number format/fixed},
+      tick label style={font=\small},
+      label style={font=\small},
+      title style={font=\normalsize}
+    ]
+      \addplot[
+        color=blue!70!black,
+        line width=0.8pt
+      ] table[
+        col sep=comma,
+        header=true,
+        x index=1,
+        y index=2
+      ]{outputs/event01/results.csv};
+      \addlegendentry{Event 01}
+
+      \addplot[
+        color=red!75!black,
+        line width=0.8pt
+      ] table[
+        col sep=comma,
+        header=true,
+        x index=1,
+        y index=2
+      ]{outputs/event02/results.csv};
+      \addlegendentry{Event 02}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Measured burden-voltage waveforms from the two provided COMTRADE events. Event 02 has
+  a much larger magnitude swing than Event 01, indicating a more severe instrumentation-channel
+  disturbance.}
+  \label{fig:burden-voltage-events}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.9\textwidth,
+      height=2.8in,
+      grid=both,
+      grid style={line width=0.1pt, draw=gray!20},
+      major grid style={line width=0.2pt, draw=gray!35},
+      xlabel={Time (s)},
+      ylabel={Chi-square value},
+      title={Chi-Square Consistency of the Dynamic State Estimation},
+      legend style={at={(0.02,0.98)}, anchor=north west, draw=none, fill=white},
+      ymode=log,
+      log basis y={10},
+      tick label style={font=\small},
+      label style={font=\small},
+      title style={font=\normalsize}
+    ]
+      \addplot[
+        color=blue!70!black,
+        line width=0.8pt
+      ] table[
+        col sep=comma,
+        header=true,
+        x index=1,
+        y index=8
+      ]{outputs/event01/results.csv};
+      \addlegendentry{Event 01}
+
+      \addplot[
+        color=red!75!black,
+        line width=0.8pt
+      ] table[
+        col sep=comma,
+        header=true,
+        x index=1,
+        y index=8
+      ]{outputs/event02/results.csv};
+      \addlegendentry{Event 02}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Per-sample chi-square values of the estimation. In this implementation, the chi-square
+  values remain very small after the measurement-model sign correction, indicating that the solved
+  state is highly consistent with the selected model equations.}
+  \label{fig:chi-square-events}
+\end{figure}
+
+\subsection{Interpretation of the Confidence Metric}
+The confidence values computed in this implementation should be interpreted carefully. The data set
+contains one direct physical waveform and many model-based virtual or derived equations. Therefore,
+the confidence metric is best interpreted as a \emph{model-consistency indicator} rather than a
+stand-alone proof of physical ground truth. In other words, a high confidence means that the state
+estimate satisfies the selected measurement model very well; it does not automatically mean that
+the true field current is independently verified by multiple sensors.
+
+\subsection{Visualization Deliverables}
+The implementation produces a tabbed HTML dashboard with separate tabs for Event 01 and Event 02.
+Each tab contains:
+\begin{itemize}
+  \item the burden voltage waveform,
+  \item estimated primary current,
+  \item estimated core flux,
+  \item confidence over time,
+  \item maximum normalized residual over time,
+  \item summary cards for the event statistics.
+\end{itemize}
+
+This dashboard is useful for quickly comparing the two event severities and for validating that the
+estimator outputs remain physically and numerically consistent over the full sample window.
+
+\section{Conclusions and Observations}
+This project implemented a dynamic state estimator for CT instrumentation-channel error correction
+using only the burden-side voltage waveform from COMTRADE data and the provided channel model. The
+solution successfully completed the required workflow:
+\begin{itemize}
+  \item COMTRADE data were parsed correctly.
+  \item The current instrumentation channel was modeled with the provided equivalent circuit.
+  \item Actual, virtual, derived, and pseudo measurements were constructed.
+  \item A Gauss--Newton weighted least-squares dynamic estimator was implemented.
+  \item Both provided events were processed and summarized.
+  \item A visual dashboard was generated for event-level interpretation.
+\end{itemize}
+
+The recovered results show that Event 02 is the more severe case, producing much higher estimated
+primary current and much larger core flux than Event 01. This is consistent with the assignment's
+description of varying CT saturation severity across the events.
+
+The added waveform and chi-square figures support the same conclusion visually. The burden-voltage
+plot shows a much stronger excursion for Event 02, while the chi-square plot shows that both event
+solutions remain numerically consistent with the final estimator model over the full duration of
+the record.
+
+The main limitation of the problem is that only one direct analog waveform is available. Because of
+this, the quality of the final estimate depends strongly on the correctness of the instrumentation
+channel model and the selected virtual/derived measurement set. Nonetheless, this is also the main
+point of the assignment: to show that a merging unit can use model-based DSE to reconstruct a more
+useful primary-side estimate from limited secondary-side data.
+
+Possible future improvements include:
+\begin{itemize}
+  \item adding independent validation data, if available,
+  \item comparing multiple derivative-discretization schemes,
+  \item extending the same methodology to a voltage instrumentation channel,
+  \item integrating the estimator more directly with a protection or relay decision block.
+\end{itemize}
+
+\begin{thebibliography}{9}
+\bibitem{meliopoulos2018}
+Sakis Meliopoulos, George Cokkinides, Jiahao Xie, and Yuan Kong,
+``Instrumentation Error Correction within Merging Units,''
+\emph{Proceedings of the 2018 Georgia Tech Fault and Disturbance Analysis Conference},
+Atlanta, Georgia, April 30--May 1, 2018.
+
+\bibitem{meliopoulos2019}
+Sakis Meliopoulos, Jiahao Xie, and George Cokkinides,
+``Impact of Error Correction on Protection Performance during Geomagnetic Disturbances,''
+\emph{Proceedings of the 2019 Georgia Tech Fault and Disturbance Analysis Conference},
+Atlanta, Georgia, April 29--30, 2019.
+
+\bibitem{kong2021}
+Yuan Kong and A. P. Sakis Meliopoulos,
+``Intelligent Merging Unit: DSE-based Online Instrumentation Channel Error Correction,''
+\emph{Electric Power Systems Research},
+Volume 200, November 2021, 107468.
+
+\bibitem{obikwelu2021}
+Emeka Obikwelu and A. P. Sakis Meliopoulos,
+``VT Instrumentation Channel Error Correction using Dynamic State Estimation,''
+\emph{Proceedings of the 52nd North American Power Symposium},
+Phoenix, Arizona, April 11--13, 2021.
+\end{thebibliography}
+
+\end{document}

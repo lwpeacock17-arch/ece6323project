@@ -1,0 +1,10 @@
+{
+  "samples": 4700,
+  "converged_samples": 4700,
+  "mean_confidence": 1.0,
+  "min_confidence": 1.0,
+  "max_primary_current_a": 19052.104278060473,
+  "min_primary_current_a": -27757.41579003716,
+  "max_flux_wb": 0.08721640812754673,
+  "max_abs_normalized_residual": 1.7531974445452238e-05
+}
