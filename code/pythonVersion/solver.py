@@ -5,11 +5,14 @@ import argparse
 import csv
 import json
 import math
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+
+from make_dashboard import build_dashboard
 
 
 STATE_NAMES = [
@@ -56,6 +59,15 @@ SIGMAS = np.array(
     ],
     dtype=float,
 )
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
+DEFAULT_EVENT_INPUTS = {
+    "event01": REPO_ROOT / "code/data/ECE6323_PROJECT_CTCHANNEL_EVENT_01_MAIN.CFG",
+    "event02": REPO_ROOT / "code/data/ECE6323_PROJECT_CTCHANNEL_EVENT_02_MAIN.cfg",
+}
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "report/outputs"
 
 
 @dataclass(frozen=True)
@@ -126,6 +138,7 @@ def parse_cfg(cfg_path: Path) -> ComtradeConfig:
     if len(lines) < 6:
         raise ValueError(f"{cfg_path} does not look like a COMTRADE CFG file.")
 
+    # Pull out the basic COMTRADE info we actually need for this project.
     station_name = lines[0].split(",")[0].strip()
     count_parts = [part.strip() for part in lines[1].split(",")]
     analog_count = 0
@@ -195,6 +208,7 @@ def parse_dat(cfg: ComtradeConfig, dat_path: Path) -> list[ComtradeRecord]:
             for index, channel in enumerate(cfg.analog_channels):
                 raw = float(row[2 + index].strip())
                 analog.append(channel.a * raw + channel.b)
+            # COMTRADE timestamps here are in microseconds, so convert to seconds.
             time_s = (timestamp_raw * cfg.time_multiplier) / 1_000_000.0
             records.append(ComtradeRecord(sample=sample, time_s=time_s, analog=analog))
     if not records:
@@ -260,22 +274,24 @@ def chi_square_survival(chi_square: float, dof: int) -> float:
 
 
 def measurement_vector(vout: float, params: SolverParameters) -> np.ndarray:
-    ib_measured = -params.gb * vout
+    # Only one real measured quantity is available, so the rest of z is built from it.
+    ib = -params.gb * vout
     z = np.zeros(21, dtype=float)
     z[0] = vout
-    z[15:20] = ib_measured
+    z[15:20] = ib
     return z
 
 
 def initial_state(vout: float, params: SolverParameters, prev_state: np.ndarray | None) -> np.ndarray:
+    # Start close to the burden measurement so Newton has a reasonable first guess.
     x = np.array(prev_state, copy=True) if prev_state is not None else np.zeros(15, dtype=float)
     burden_current = -params.gb * vout
-    estimated_ip = -params.n_ratio * burden_current
+    rough_ip = -params.n_ratio * burden_current
     x[0] = vout
     x[1] = 0.0
     x[2] = vout
     x[3] = 0.0
-    x[10] = estimated_ip
+    x[10] = rough_ip
     x[11] = 0.0 if prev_state is None else x[11]
     x[12] = burden_current
     x[13] = burden_current
@@ -286,6 +302,7 @@ def initial_state(vout: float, params: SolverParameters, prev_state: np.ndarray 
 def measurement_function(
     x: np.ndarray, prev_x: np.ndarray, dt: float, params: SolverParameters
 ) -> np.ndarray:
+    # This is the set of algebraic + dynamic equations written in measurement form h(x).
     v1, v2, v3, v4, e, lam, y1, y2, y3, y4, ip, im, iL1, iL2, iL3 = x
     _, _, _, _, _, prev_lam, _, _, _, _, _, _, prev_iL1, prev_iL2, prev_iL3 = prev_x
 
@@ -333,6 +350,7 @@ def objective(z: np.ndarray, h: np.ndarray) -> float:
 def numerical_jacobian(
     x: np.ndarray, prev_x: np.ndarray, dt: float, params: SolverParameters
 ) -> np.ndarray:
+    # Finite differences were good enough here and easier to debug than a full symbolic Jacobian.
     base = measurement_function(x, prev_x, dt, params)
     jac = np.zeros((base.size, x.size), dtype=float)
     for i in range(x.size):
@@ -368,23 +386,25 @@ def gauss_newton_step(
             return x, iteration, False
         if float(np.max(np.abs(jac))) > 1.0e12:
             return x, iteration, False
-        weighted_jac = jac * w_diag[:, None]
+        jw = jac * w_diag[:, None]
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            lhs = jac.T @ weighted_jac + damping * np.eye(x.size)
-            rhs = jac.T @ (w_diag * residual)
-        if (not np.all(np.isfinite(lhs))) or (not np.all(np.isfinite(rhs))):
+            A = jac.T @ jw + damping * np.eye(x.size)
+            b = jac.T @ (w_diag * residual)
+        if (not np.all(np.isfinite(A))) or (not np.all(np.isfinite(b))):
             return x, iteration, False
 
         try:
-            dx = np.linalg.solve(lhs, rhs)
+            dx = np.linalg.solve(A, b)
         except np.linalg.LinAlgError:
-            dx = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
+            # If the matrix gets ugly, least squares still usually gives a usable direction.
+            dx = np.linalg.lstsq(A, b, rcond=None)[0]
         if not np.all(np.isfinite(dx)):
             return x, iteration, False
 
         if np.linalg.norm(dx, ord=np.inf) < 1.0e-9:
             return x, iteration, True
 
+        # Just back off the step if it made things worse.
         step_scale = 1.0
         accepted = False
         for _ in range(12):
@@ -422,11 +442,11 @@ def solve_records(
 
     for record in records:
         vout = float(record.analog[analog_index])
-        dt = (
-            max(record.time_s - previous_time, 1.0e-6)
-            if previous_time is not None
-            else 1.0e-6
-        )
+        if previous_time is None:
+            dt = 1.0e-6
+        else:
+            dt = max(record.time_s - previous_time, 1.0e-6)
+        # Carry the last solution forward since adjacent samples should be close.
         guess = initial_state(vout, params, previous_state if results else None)
         estimate, iterations, converged = gauss_newton_step(
             z=measurement_vector(vout, params),
@@ -470,6 +490,7 @@ def synthetic_records(count: int = 120, sample_rate_hz: float = 4800.0) -> list[
     for idx in range(count):
         t = idx / sample_rate_hz
         vout = 0.18 * math.sin(2.0 * math.pi * 60.0 * t) + 0.02 * math.sin(2.0 * math.pi * 180.0 * t)
+        # Add a little disturbance so the smoke test is not just a clean sinusoid.
         if 0.018 <= t <= 0.028:
             vout += 0.12 * math.sin(2.0 * math.pi * 60.0 * t)
         records.append(ComtradeRecord(sample=idx + 1, time_s=t, analog=[vout]))
@@ -565,6 +586,7 @@ def write_outputs(results: list[SolveResult], output_dir: Path) -> None:
         for result in results:
             writer.writerow([result.sample, result.time_s, *result.residuals.tolist()])
 
+    # Throw a few quick summary stats in json so the dashboard/report can grab them.
     summary = {
         "samples": len(results),
         "converged_samples": sum(1 for result in results if result.converged),
@@ -655,31 +677,84 @@ def resolve_dat_path(cfg_path: Path, dat_path: Path | None) -> Path:
     raise FileNotFoundError(f"Could not locate DAT file for {cfg_path}.")
 
 
-def run_solver(args: argparse.Namespace) -> Path:
+def solve_comtrade_event(
+    cfg_path: Path,
+    dat_path: Path | None,
+    channel: int,
+    limit: int | None,
+    max_iter: int,
+    output_dir: Path,
+) -> Path:
     params = SolverParameters()
+    cfg_file = cfg_path.expanduser().resolve()
+    dat_file = resolve_dat_path(
+        cfg_file,
+        dat_path.expanduser().resolve() if dat_path is not None else None,
+    )
+    cfg = parse_cfg(cfg_file)
+    records = parse_dat(cfg, dat_file)
+    if limit:
+        records = records[:limit]
+    chan_idx = channel - 1
+    if chan_idx < 0 or chan_idx >= len(cfg.analog_channels):
+        raise ValueError(f"Analog channel {channel} is out of range for {cfg_file}.")
+    results = solve_records(records, chan_idx, params, max_iter)
+    out_dir = output_dir.expanduser().resolve()
+    write_outputs(results, out_dir)
+    return out_dir
 
+
+def run_single_solver(args: argparse.Namespace) -> Path:
+    params = SolverParameters()
     if args.synthetic:
         records = synthetic_records(count=args.limit or 120)
-        output_dir = Path(args.output_dir or "outputs/synthetic")
-    else:
-        cfg_path = Path(args.cfg).expanduser().resolve()
-        dat_path = resolve_dat_path(cfg_path, Path(args.dat).expanduser().resolve() if args.dat else None)
-        cfg = parse_cfg(cfg_path)
-        records = parse_dat(cfg, dat_path)
-        if args.limit:
-            records = records[: args.limit]
-        analog_index = args.channel - 1
-        if analog_index < 0 or analog_index >= len(cfg.analog_channels):
-            raise ValueError(f"Analog channel {args.channel} is out of range for {cfg_path}.")
-        results = solve_records(records, analog_index, params, args.max_iter)
-        output_dir = Path(args.output_dir or f"outputs/{cfg_path.stem}").resolve()
+        results = solve_records(records, 0, params, args.max_iter)
+        output_dir = Path(args.output_dir or "outputs/synthetic").resolve()
         write_outputs(results, output_dir)
         return output_dir
+    return solve_comtrade_event(
+        cfg_path=Path(args.cfg),
+        dat_path=Path(args.dat) if args.dat else None,
+        channel=args.channel,
+        limit=args.limit,
+        max_iter=args.max_iter,
+        output_dir=Path(args.output_dir or f"outputs/{Path(args.cfg).stem}"),
+    )
 
-    results = solve_records(records, 0, params, args.max_iter)
-    output_dir = Path(args.output_dir or "outputs/synthetic").resolve()
-    write_outputs(results, output_dir)
-    return output_dir
+
+def run_project_events(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    # If someone does a quick limit test, don't stomp on the real dashboard files.
+    output_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else DEFAULT_OUTPUT_ROOT
+    if args.limit and not args.output_dir:
+        output_root = DEFAULT_OUTPUT_ROOT / f"preview_limit_{args.limit}"
+
+    event01_dir = solve_comtrade_event(
+        cfg_path=DEFAULT_EVENT_INPUTS["event01"],
+        dat_path=None,
+        channel=args.channel,
+        limit=args.limit,
+        max_iter=args.max_iter,
+        output_dir=output_root / "event01",
+    )
+    event02_dir = solve_comtrade_event(
+        cfg_path=DEFAULT_EVENT_INPUTS["event02"],
+        dat_path=None,
+        channel=args.channel,
+        limit=args.limit,
+        max_iter=args.max_iter,
+        output_dir=output_root / "event02",
+    )
+    dashboard_path = build_dashboard(
+        event01_dir=event01_dir,
+        event02_dir=event02_dir,
+        output_path=output_root / "dashboard.html",
+    )
+    return event01_dir, event02_dir, dashboard_path
+
+
+def open_in_browser(path: Path) -> None:
+    # Basic convenience thing so running the solver pops the dashboard open.
+    webbrowser.open(path.resolve().as_uri())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -702,6 +777,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a smoke test with synthetic vout data instead of COMTRADE input.",
     )
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="Generate outputs without launching the dashboard in the default browser.",
+    )
     return parser
 
 
@@ -709,9 +789,16 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if not args.synthetic and not args.cfg:
-        parser.error("provide a CFG file or use --synthetic")
+        # Default behavior for the project is to run both provided event files.
+        event01_dir, event02_dir, dashboard_path = run_project_events(args)
+        print(f"Event 01 report: {event01_dir / 'report.html'}")
+        print(f"Event 02 report: {event02_dir / 'report.html'}")
+        print(f"Dashboard written to {dashboard_path}")
+        if not args.no_open_browser:
+            open_in_browser(dashboard_path)
+        return
 
-    output_dir = run_solver(args)
+    output_dir = run_single_solver(args)
     print(f"Report written to {output_dir}")
     print(f"CSV results: {output_dir / 'results.csv'}")
     print(f"HTML report: {output_dir / 'report.html'}")
